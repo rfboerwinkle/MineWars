@@ -23,34 +23,52 @@ async def Reciever(websocket, path):
 def MainLoop():
 	global Actions
 
-	Teams = []
-	Team = {"websocket":False, "color":[0,0,0], "status":"w", "energy":0, "base coords":[0,0], "energy needs":[], "ammo paths":[], "packets":[]}
+	Teams = {}
+	Team = {"websocket":False, "color":[0,0,0], "status":"w", "energy":0, "base coords":[0,0], "energy needs":[], "ammo paths":[], "packets":[], "soylent":0}
 	#status: "w":waiting to place a base, "a":alive, "d":dead, "l":left and websocket is false
 	#energy needs:[type, needed energy, path] note that needed energy can be zero, meaning the packets are on their way.
 	#packets:[type, path, last index, distancegone, distanceleft]
 
 	Packet = {"type":"construction", "path":False, "start":0, "end":1, "distance traveled":0, "total distance":0}#"start" and "end" are the index (of "path") of the current buildings it is between
 
-	Settings = {}
-
 	TerrainColors = []
 	TerrainMap = [[[15,True],[14,False],[13,False],[12,False]], [[8,False],[9,False],[10,False],[11,False]], [[7,False],[6,False],[5,False],[4,False]], [[0,False],[1,False],[2,False],[3,True]]] #[height, (is a mine?)]
 
-	BuildingInfo = {"base":{"movable":True, "ammo":False}, "collector":{"movable":False, "ammo":False}, "blaster":{"movable":True, "ammo":True}, "relay":{"movable":False, "ammo":False}}
-	Buildings = {"base":{"type":"base", "team":0, "health":50, "completion":50, "energy":20, "connections":[]}, "collector":{"type":"collector", "team":5, "health":1, "completion":5, "connections":[]}, "blaster":{"type":"blaster", "team":0, "health":10, "completion":15, "angle":0, "ammo":[0,10], "connections":[]}, "relay":{"type":"relay", "team":10, "health":5, "completion":10, "connections":[]}}#remember to copy.deepcopy
+	BuildingInfo = {"base":{"movable":True, "ammo":False, "cooldown":False}, "collector":{"movable":False, "ammo":False, "cooldown":False}, "blaster":{"movable":True, "ammo":True, "cooldown":30}, "relay":{"movable":False, "ammo":False, "cooldown":False}}
+	Buildings = {"base":{"type":"base", "team":0, "health":50, "completion":50, "connections":[]}, "collector":{"type":"collector", "team":0, "health":1, "completion":5, "connections":[], "connected":False}, "blaster":{"type":"blaster", "team":0, "health":10, "completion":15, "angle":0, "ammo":[0,10], "connections":[], "cooldown":0}, "relay":{"type":"relay", "team":0, "health":5, "completion":10, "connections":[]}}
+	#remember to copy.deepcopy
+	#collectors have unique key: connected
 	BuildingMap = []#Building, otherwise False
 	FlyingBuildings = []#[Building, vector, currentcoords, endcoords]  starting coords are in Building["coords"]
 	BuildingMapDelta = []#[coords]
+	SoylentMap = []#[teams]
+	SoylentMapDelta = []#[coords]
 	LiquidMap = []#[team, height]
 
-	Lazers = []#[start coords, end coords]
+	Lasers = []#[start coords, end coords]
 
+	EnergyCooldown = 15#should be 15
+	EnergyTimer = 15
 	ConnectionRange = 5
 	BlasterRange = 10
+	SoylentRange = 4
 	EightSquares = ((-1,-1), (0,-1), (1,-1), (1,0), (1,1), (0,1), (-1,1), (-1,0))
+	MapSize = []#len() values
+
+	def MakeNewThing(thing):#TODO use this instead of deepcopy
+		if(thing == "team"):
+			output = {"websocket":False, "color":[0,0,0], "status":"w", "energy":0, "base coords":[0,0], "energy needs":[], "ammo paths":[], "packets":[]}
+		elif(thing == "false map"):
+			output = []
+			for y in range(MapSize[1]):
+				newrow = []
+				for x in range(MapSize[0]):
+					newrow.append(False)
+				output.append(newrow)
+		return output
 
 	def Circle(r, donut = True, sort = False):
-		rsqr = r*r
+		rsqr = r**2
 
 		tiles = []
 		for x in range((r*-1), (r+1)):
@@ -68,47 +86,27 @@ def MainLoop():
 
 	ConnectionCircle = Circle(ConnectionRange, sort = True)
 	BlasterCircle = Circle(BlasterRange, sort = True)
+	SoylentCircle = Circle(SoylentRange, sort = True)
+	DoubleSoylentCircle = Circle(SoylentRange*2)
 
 	def NewMap(mapname):
-		nonlocal TerrainColors, TerrainMap, BuildingMap, Settings, LiquidMap, FlyingBuildings
+		nonlocal TerrainColors, TerrainMap, BuildingMap, LiquidMap, SoylentMap, FlyingBuildings, Teams, MapSize
 
-		mapfile = open("Maps/"+mapname+".txt", "r")#Line 1: TerrainColor, 2: TerrainMap, 3+:optional settings
+		mapfile = open("Maps/"+mapname+".txt", "r")#Line 1: TerrainColor, 2: TerrainMap
 		maplist = mapfile.read()
 		maplist = maplist.splitlines()
 		TerrainColors = json.loads(maplist[0])
 		TerrainMap = json.loads(maplist[1])
-		for i in range(len(maplist)-2):
-			tointerpret = maplist[i+2]
-			name = ""
-			for char in tointerpret:
-				if(char == ":"):
-					setting = name
-					name = ""
-					continue
-				name = name + char
-			print(name)
-			Settings[setting] = json.loads(name)
-		print(Settings)
 
-		LiquidMap = []
-		for row in TerrainMap:
-			newrow = []
-			for square in row:
-				newrow.append(False)
-			LiquidMap.append(newrow)
+		MapSize = [len(TerrainMap[0]), len(TerrainMap)]
 
 		FlyingBuildings = []
 
-		BuildingMap = []
-		for row in TerrainMap:
-			newrow = []
-			for square in row:
-				newrow.append(False)
-			BuildingMap.append(newrow)
+		LiquidMap = MakeNewThing("false map")
+		BuildingMap = MakeNewThing("false map")
+		SoylentMap = MakeNewThing("false map")
 
-		Send({"type":"terrain map", "map":TerrainMap})
-		Send({"type":"terrain colors", "colors":TerrainColors})
-		Send({"type":"settings", "settings":Settings})
+		Sync()
 
 	def CheckEdges(coords):
 		if(coords[0]<0 or coords[1]<0 or coords[0] >= len(TerrainMap[0]) or coords[1] >= len(TerrainMap)):
@@ -120,25 +118,48 @@ def MainLoop():
 		return math.sqrt((coords1[0] - coords2[0])**2 + (coords1[1] - coords2[1])**2)
 
 	def GetEnergy():#needs to be changed to soylent
-		for line in BuildingMap:
-			for square in line:
-				if(square == False):
-					continue
-				if(square["type"] == "base" or square["type"] == "collector"):
-					if(square["completion"] == 0):
-						Teams[square["team"]]["energy"] += .05
+		for team in Teams:
+			if(Teams[team]["status"] == "a"):
+				Teams[team]["energy"] += .5
+				Teams[team]["energy"] += Teams[team]["soylent"] * .005
 
-	def Send(message, websocket = False):
+	def Send(message, websocket = False):#maybe make team instead of websocket?
 		message = json.dumps(message)
 		if not(websocket):
 			for team in Teams:
-				if(team["status"] == "l"):
+				if(Teams[team]["status"] == "l"):
 					continue
-				asyncio.run(team["websocket"].send(message))#Really, we shouldn't call run each time. We need to make a separate message collector event loop handle thing
+				asyncio.run(Teams[team]["websocket"].send(message))#Really, we shouldn't call run each time. We need to make a separate message collector event loop handle thing
 		else:
-			asyncio.run(websocket.send(message))
+			ok = True
+			for team in Teams:
+				if(Teams[team]["status"] == "l"):
+					ok = False
+					break
+			if(ok):
+				asyncio.run(websocket.send(message))
 
-	def Sync():
+	def Doctor(typeofthing, thing, onteam = True):
+		if(typeofthing == "building"):
+			if(onteam):
+				output = {"type":thing["type"], "team":thing["team"], "connections":thing["connections"], "health":thing["health"], "completion":thing["completion"]}
+				if(BuildingInfo[thing["type"]]["ammo"]):
+					output["ammo"] = thing["ammo"][0]
+			else:
+				output = {"type":thing["type"], "team":thing["team"], "connections":thing["connection"]}
+		elif(typeofthing == "flying building"):
+			if(onteam):
+				output = {"type":thing["type"], "team":thing["team"], "health":thing["health"]}
+			else:
+				output = {"type":thing["type"], "team":thing["team"]}
+		elif(typeofthing == "team"):
+			if(onteam):
+				output = {"color":thing["color"], "status":thing["status"], "energy":int(thing["energy"])}
+			else:
+				output = {"color":thing["color"], "status":thing["status"]}
+		return output
+
+	def Sync(websocket = False):#maybe make team instead of websocket?
 		nonlocal BuildingMap
 
 		doctoredbuildingmap = []
@@ -148,13 +169,21 @@ def MainLoop():
 				if(square == False):
 					doctoredline.append(False)
 				else:
-					doctoredsquare = {"type":square["type"], "team":square["team"]}
-					doctoredsquare["connections"] = square["connections"]
+					doctoredsquare = Doctor("building", square)
 					doctoredline.append(doctoredsquare)
 			doctoredbuildingmap.append(doctoredline)
 
-		outgoing = {"type":"sync", "building map":doctoredbuildingmap}
-		Send(outgoing)
+		outgoing = {"type":"sync", "building map":doctoredbuildingmap, "terrain map":TerrainMap, "terrain colors":TerrainColors, "building info":BuildingInfo, "soylent map":SoylentMap}
+		if(websocket):
+			for team in Teams:
+				if(Teams[team]["websocket"] == websocket):
+					outgoing["own team"] = team
+					Send(outgoing, websocket = websocket)
+					break
+		else:
+			for team in Teams:
+				outgoing["own team"] = team
+				Send(outgoing, websocket = Team[team]["websocket"])
 
 	def RemoveConnections(coords):
 		for i in range(len(BuildingMap[coords[1]][coords[0]]["connections"])):
@@ -172,6 +201,63 @@ def MainLoop():
 					BuildingMap[tile[1]][tile[0]]["connections"].append(coords)
 					BuildingMap[coords[1]][coords[0]]["connections"].append(tile)
 
+	def UpdateSoylent(coords = False, total = False):
+		collectors = []#[coods, team]
+		if(total):
+			for y in range(len(BuildingMap)):
+				for x in range(len(BuildingMap[y])):
+					if(BuildingMap[y][x]):
+						if(BuildingMap[y][x]["type"] == "collector" and BuildingMap[y][x]["completion"] == 0):
+							if(BuildingMap[y][x]["connected"]):
+								collectors.append([[x,y], BuildingMap[y][x]["team"]])
+
+		else:
+			if(BuildingMap[coords[1]][coords[0]]):
+				if(BuildingMap[coords[1]][coords[0]]["type"] == "collector" and BuildingMap[coords[1]][coords[0]]["completion"] == 0):
+					collectors.append([coords, BuildingMap[coords[1]][coords[0]]["team"]])
+
+			for rawcoords in DoubleSoylentCircle:
+				collectorcoords = [coords[0]+rawcoords[0], coords[1]+rawcoords[1]]
+				if not (CheckEdges(collectorcoords)):
+					continue
+				if(BuildingMap[collectorcoords[1]][collectorcoords[0]]):
+					if(BuildingMap[collectorcoords[1]][collectorcoords[0]]["type"] == "collector" and BuildingMap[collectorcoords[1]][collectorcoords[0]]["completion"] == 0):
+						collectors.append([collectorcoords, BuildingMap[collectorcoords[1]][collectorcoords[0]]["team"]])
+
+		tocheck = []
+		if(total):
+			for y in range(len(BuildingMap)):
+				for x in range(len(BuildingMap[y])):
+					tocheck.append((x,y))
+		else:
+			tocheck = SoylentCircle+[[0,0]]
+
+		for rawcoords in tocheck:
+			if(total):
+				checkcoords = rawcoords
+			else:
+				checkcoords = [rawcoords[0]+coords[0], rawcoords[1]+coords[1]]
+			if not (CheckEdges(checkcoords)):
+				continue
+			tile = SoylentMap[checkcoords[1]][checkcoords[0]]
+			lowestdistance = SoylentRange**2#guarantees that the collector is at least in range
+			lowestteam = False
+			for collector in collectors:
+				distance = (collector[0][0] - checkcoords[0])**2 + (collector[0][1] - checkcoords[1])**2
+				if(distance <= lowestdistance):
+					lowestdistance = distance
+					lowestteam = collector[1]
+			SoylentMap[checkcoords[1]][checkcoords[0]] = lowestteam
+			SoylentMapDelta.append(checkcoords)
+
+		for team in Teams:
+			Teams[team]["soylent"] = 0
+
+		for row in SoylentMap:
+			for square in row:
+				if(square):
+					Teams[square]["soylent"] += 1
+
 	def Move(startcoords, endcoords):
 		nonlocal BuildingMap, BuildingMapDelta, FlyingBuildings
 		building = BuildingMap[startcoords[1]][startcoords[0]]
@@ -184,10 +270,11 @@ def MainLoop():
 			vector[0] = 0
 		if(abs(vector[1]) < .00000001):#to prevent instant moving
 			vector[1] = 0
+		for connection in building["connections"]:
+			BuildingMapDelta.append(connection)
 		RemoveConnections(startcoords)
 		FlyingBuildings.append([building, vector, startcoords, endcoords])
 		BuildingMap[startcoords[1]][startcoords[0]] = False
-		print(FlyingBuildings[-1])
 		Census(building["team"])
 		BuildingMapDelta.append(startcoords)
 
@@ -200,17 +287,31 @@ def MainLoop():
 			Teams[building["team"]]["base coords"] = [building["coords"][0], building["coords"][1]]
 		BuildingMap[flyingbuilding[3][1]][flyingbuilding[3][0]] = building
 		MakeConnections(building["coords"])
+		for connection in building["connections"]:
+			BuildingMapDelta.append(connection)
 		Census(building["team"])
 		BuildingMapDelta.append(building["coords"])
 		FlyingBuildings.remove(flyingbuilding)
 
 	def Raze(coords):
-		nonlocal BuildingMap
-		nonlocal BuildingMapDelta
+		nonlocal BuildingMap, BuildingMapDelta
 
-		team = BuildingMap[coords[1]][coords[0]]["team"]
+		building = BuildingMap[coords[1]][coords[0]]
+
+		team = building["team"]
+		for connection in building["connections"]:
+			BuildingMapDelta.append(connection)
 		RemoveConnections(coords)
+
+		if(building["type"] == "base"):
+			if(Teams[building["team"]]["status"] == "a"):
+				Teams[building["team"]]["status"] = "d"
+
 		BuildingMap[coords[1]][coords[0]] = False
+
+		if(building["type"] == "collector"):
+			UpdateSoylent(coords = coords)
+
 		Census(team)
 		BuildingMapDelta.append(coords)
 
@@ -233,14 +334,18 @@ def MainLoop():
 		return packetnumber
 
 	def Census(team):#try not to use
-		nonlocal BuildingMap
-		nonlocal BuildingInfo
-		nonlocal Teams
+		nonlocal BuildingMap, SoylentMap, BuildingInfo, Teams
 
 		basecoords = Teams[team]["base coords"]
 		if not(BuildingMap[basecoords[1]][basecoords[0]]):
 			print("Team ", team, " is dead! (or we just can't find the base for some reason...)")
 			return
+
+		for row in BuildingMap:
+			for square in row:
+				if(square):
+					if(square["type"] == "collector" and square["team"] == team):
+						square["connected"] = False
 
 		Teams[team]["energy needs"] = []
 		Teams[team]["ammo paths"] = []
@@ -259,8 +364,11 @@ def MainLoop():
 				Teams[team]["energy needs"].append(["construction", neededenergy, searching[2]])
 				continue
 
-			if(BuildingInfo[building["type"]]["ammo"]):#TODO use different list
+			if(BuildingInfo[building["type"]]["ammo"]):
 				Teams[team]["ammo paths"].append(searching[2])
+
+			if(building["type"] == "collector"):
+				building["connected"] = True
 
 			for connectedcoords in building["connections"]:
 				found = False
@@ -283,6 +391,7 @@ def MainLoop():
 
 				tosearch.append([connectedcoords, distance, searching[2] + [connectedcoords]])
 
+		UpdateSoylent(total = True)
 		print("energy needs: ", Teams[team]["energy needs"])
 
 
@@ -308,11 +417,16 @@ def MainLoop():
 		nonlocal BuildingMap
 		nonlocal BuildingMapDelta
 		nonlocal LiquidMap
-		nonlocal Lazers
+		nonlocal Lasers
 
 		building = BuildingMap[y][x]
 
-		if(building["completion"] != 0):
+		if(building["completion"] > 0):
+			return
+		building["cooldown"] -= 1
+		if(building["cooldown"] <= 0):
+			building["cooldown"] = BuildingInfo[building["type"]]["cooldown"]
+		else:
 			return
 		if(building["ammo"][0] <= 0):
 			return
@@ -325,9 +439,9 @@ def MainLoop():
 			if(LiquidMap[coords[1]][coords[0]]):
 				if(LiquidMap[coords[1]][coords[0]][0] != building["team"]):
 					BuildingMapDelta.append([x,y])#maybe LiquidMapDelta
-					Lazers.append(((x,y),coords))
+					Lasers.append(((x,y),coords))
 					LiquidMap[coords[1]][coords[0]][1] -= 5
-					if(LiquidMap[coords[1]][coords[0]][1] < 0):
+					if(LiquidMap[coords[1]][coords[0]][1] <= 0):
 						LiquidMap[coords[1]][coords[0]][1] = 0
 					building["ammo"][0] -= 1
 					break
@@ -336,9 +450,9 @@ def MainLoop():
 				if(BuildingMap[coords[1]][coords[0]]["team"] != building["team"]):
 					BuildingMapDelta.append(coords)
 					BuildingMapDelta.append([x,y])
-					Lazers.append(((x,y),coords))
+					Lasers.append(((x,y),coords))
 					BuildingMap[coords[1]][coords[0]]["health"] -= 5
-					if(BuildingMap[coords[1]][coords[0]]["health"] < 0):
+					if(BuildingMap[coords[1]][coords[0]]["health"] <= 0):
 						Raze(coords)
 					building["ammo"][0] -= 1
 					break
@@ -351,55 +465,55 @@ def MainLoop():
 		for i in range(len(Actions)):
 			action = Actions.pop(0)
 			if(action["metatype"] == "new player"):
-				openteams = []
-				Teams.append(copy.deepcopy(Team))
-				Teams[-1]["websocket"] = action["websocket"]
+				name = str(len(Teams))
+				Teams[name] = copy.deepcopy(Team)
+				Teams[name]["websocket"] = action["websocket"]
 				print(Teams)
-				Send({"type":"terrain map", "map":TerrainMap}, websocket = Teams[-1]["websocket"])
-				Send({"type":"terrain colors", "colors":TerrainColors}, websocket = Teams[-1]["websocket"])
-				Send({"type":"settings", "settings":Settings}, websocket = Teams[-1]["websocket"])
-				Send({"type":"building info", "info":BuildingInfo}, websocket = Teams[-1]["websocket"])
-				Send({"type":"team", "team":len(Teams)-1}, websocket = Teams[-1]["websocket"])
-				Sync()
+				Sync(websocket = action["websocket"])
 			elif(action["metatype"] == "remove team"):
-				for team in range(len(Teams)):
+				for team in Teams:
 					if(Teams[team]["websocket"] == action["websocket"]):
 						Teams[team]["status"] = "l"
 						break
 			elif(action["metatype"] == "player action"):
-				for i,team in enumerate(Teams):
-					if(team["websocket"] == action["websocket"]):
+				for team in Teams:
+					if(Teams[team]["websocket"] == action["websocket"]):
 						if(action["type"] == "erect"):
-							if not(BuildingMap[action["coords"][1]][action["coords"][0]]):
+							if (not BuildingMap[action["coords"][1]][action["coords"][0]]) and (action["building"] != "base"):
 								BuildingMap[action["coords"][1]][action["coords"][0]] = copy.deepcopy(Buildings[action["building"]])
-								BuildingMap[action["coords"][1]][action["coords"][0]]["team"] = i
+								BuildingMap[action["coords"][1]][action["coords"][0]]["team"] = team
 								MakeConnections(action["coords"])
-								Census(i)
+								Census(team)
 								BuildingMapDelta.append(action["coords"])
 						elif(action["type"] == "raze"):
 							if(BuildingMap[action["coords"][1]][action["coords"][0]]):
-								if(BuildingMap[action["coords"][1]][action["coords"][0]]["team"] == i and BuildingMap[action["coords"][1]][action["coords"][0]]["type"] != "base"):
+								if(BuildingMap[action["coords"][1]][action["coords"][0]]["team"] == team and BuildingMap[action["coords"][1]][action["coords"][0]]["type"] != "base"):
 									Raze(action["coords"])
 						elif(action["type"] == "translate"):
 							if(BuildingMap[action["start"][1]][action["start"][0]]):
-								if(BuildingMap[action["start"][1]][action["start"][0]]["team"] == i):
+								if(BuildingMap[action["start"][1]][action["start"][0]]["team"] == team and BuildingInfo[BuildingMap[action["start"][1]][action["start"][0]]["type"]]["movable"]):
 									Move(action["start"], action["end"])
 						elif(action["type"] == "land"):
-							if(team["status"] == "w"):
-								team["color"] = action["color"]
-								team["base coords"] = action["coords"]
-								team["status"] = "a"
+							if(Teams[team]["status"] == "w"):
+								Teams[team]["color"] = action["color"]
+								Teams[team]["base coords"] = action["coords"]
+								Teams[team]["status"] = "a"
 								BuildingMap[action["coords"][1]][action["coords"][0]] = copy.deepcopy(Buildings["base"])
-								BuildingMap[action["coords"][1]][action["coords"][0]]["team"] = i
+								BuildingMap[action["coords"][1]][action["coords"][0]]["team"] = team
 								BuildingMap[action["coords"][1]][action["coords"][0]]["completion"] = 0
 								BuildingMapDelta.append(action["coords"])
 						elif(action["type"] == "color"):
-							team["color"] = action["color"]
+							Teams[team]["color"] = action["color"]
 						elif(action["type"] == "say"):
-							print(i, ": ", action["words"])
+							print(team, ": ", action["words"])
+						else:
+							print(action)
 						break
 		#do stuff
-		GetEnergy()
+		EnergyTimer -= 1
+		if(EnergyTimer <= 0):
+			GetEnergy()
+			EnergyTimer = EnergyCooldown
 
 		#fly buildings
 		for flyingbuilding in FlyingBuildings:
@@ -420,32 +534,32 @@ def MainLoop():
 
 		for team in Teams:
 			#get ammo needs
-			for path in team["ammo paths"]:
+			for path in Teams[team]["ammo paths"]:
 				building = BuildingMap[path[-1][1]][path[-1][0]]
 				if(building == False):
-					team["ammo paths"].remove(path)
+					Teams[team]["ammo paths"].remove(path)
 					continue
 				if(building["ammo"][0] < building["ammo"][1]):
 					goodtogo = True
-					for need in team["energy needs"]:
+					for need in Teams[team]["energy needs"]:
 						if(need[2][-1] == path[-1]):
 							goodtogo = False
 							break
 
 					if(goodtogo):
-						team["energy needs"].append(["ammo", building["ammo"][1] - building["ammo"][0], path])
+						Teams[team]["energy needs"].append(["ammo", building["ammo"][1] - building["ammo"][0], path])
 
 			#distribute energy
-			team["energy needs"].sort(key = lambda x:x[1])
-			if(len(team["energy needs"]) != 0):
-				print("----------", team["energy needs"])
+			Teams[team]["energy needs"].sort(key = lambda x:x[1])
+			if(len(Teams[team]["energy needs"]) != 0):
+				print("----------", Teams[team]["energy needs"])
 
 			toremove = []
 			toadd = []
-			for i,need in enumerate(team["energy needs"]):
-				if(team["energy"] >= 1 and need[1] > 0):
+			for i,need in enumerate(Teams[team]["energy needs"]):
+				if(Teams[team]["energy"] >= 1 and need[1] > 0):
 					BuildingMapDelta.append(need[2][-1])#move to when packet arrives
-					team["energy"] -= 1
+					Teams[team]["energy"] -= 1
 					building = BuildingMap[need[2][-1][1]][need[2][-1][0]]
 					if(building == False):
 						toremove.append(i)
@@ -454,17 +568,25 @@ def MainLoop():
 						building["completion"] -= 1#should make packet
 					if(need[0] == "ammo"):
 						building["ammo"][0] += 1#should make packet
-					team["energy needs"][i][1] = need[1] - 1
+					Teams[team]["energy needs"][i][1] = need[1] - 1
 					if(need[1] == 0):
 						if(need[0] == "construction"):
 							if(building["completion"] == 0):
+								if(building["type"] == "collector"):
+									UpdateSoylent(coords = need[2][-1])
 								if(BuildingInfo[building["type"]]["ammo"]):
-									team["ammo paths"].append(need[2])
-						toremove.append(i)
+									Teams[team]["ammo paths"].append(need[2])
+								toremove.append(i)
+						elif(need[0] == "ammo"):
+							if(building["ammo"][0] == building["ammo"][1]):
+								toremove.append(i)
 
 			lower = 0
 			for i in toremove:
-				team["energy needs"].pop(i - lower)
+				need = Teams[team]["energy needs"].pop(i - lower)
+				if(need[0] == "construction"):
+					Census(team)
+					break
 				lower += 1
 
 		for y in range(len(BuildingMap)):
@@ -475,32 +597,39 @@ def MainLoop():
 					BlasterFunction(x,y)
 
 		#transmit
-		if(len(BuildingMapDelta) > 0):
-			outgoingbmd = {"type":"building map delta", "info":[]}
+		if(len(BuildingMapDelta) > 0 or len(SoylentMapDelta) > 0):
+			outgoingdeltas = {"type":"deltas", "building map":[], "soylent map":[]}
 			for coords in BuildingMapDelta:
 				building = BuildingMap[coords[1]][coords[0]]
 				if(building):
-					print(building)
-					doctoredbuilding = {"type":building["type"], "team":building["team"], "connections":building["connections"]}
+					doctoredbuilding = Doctor("building", building)
 				else:
 					doctoredbuilding = False
-				outgoingbmd["info"].append([coords, doctoredbuilding])
+				outgoingdeltas["building map"].append([coords, doctoredbuilding])
 			BuildingMapDelta = []
-			Send(outgoingbmd)
+
+			for coords in SoylentMapDelta:
+				outgoingdeltas["soylent map"].append([coords, SoylentMap[coords[1]][coords[0]]])
+			SoylentMapDelta = []
+
+			Send(outgoingdeltas)
 
 		outgoingmisc = {"type":"misc"}
 
 		doctoredflyingbuildings = []
 		for building in FlyingBuildings:
-			doctoredbuilding = [{"type":building[0]["type"], "team":building[0]["team"]}, building[2]]
+			doctoredbuilding = [Doctor("flying building", building[0]), building[2]]
 			doctoredflyingbuildings.append(doctoredbuilding)
 		outgoingmisc["flying buildings"] = doctoredflyingbuildings
 
-		doctoredteams = []
+		doctoredteams = {}
 		for team in Teams:
-			doctoredteams.append({"color":team["color"], "status":team["status"], "energy":int(team["energy"])})
-
+			doctoredteams[team] = Doctor("team", Teams[team])
 		outgoingmisc["teams"] = doctoredteams
+
+		outgoingmisc["lasers"] = Lasers
+		Lasers = []
+
 		Send(outgoingmisc)
 
 GameThread = None
